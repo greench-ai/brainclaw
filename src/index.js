@@ -5,63 +5,56 @@
 import Fastify from 'fastify';
 import cors from '@fastify/cors';
 import { WebSocketServer } from 'ws';
+import { createServer } from 'http';
 import { nanoid } from 'nanoid';
 import { getDb, upsertAgent, listAgents, getStats, insertSharedHint, getSharedHints, voteHint, getEpisodesByAgent, getTopEpisodes } from './db.js';
 import { recordExperience, processFeedback, retrieve, formatInjection, startTask, closeTask, getOpenTask } from './memory.js';
 import { formatGuidelinesJSON, formatGuidelinesPrompt, decayGuidelines } from './guidelines.js';
-import { sanitizeMemoryText, detectIntent, generalizeWithLLM } from './sanitize.js';
-import { join, dirname } from 'path';
-import { fileURLToPath } from 'url';
+import { sanitizeMemoryText, detectIntent } from './sanitize.js';
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
 const PORT = 3002;
 const HOST = '0.0.0.0';
 
 // ── LLM Integration ─────────────────────────────────────────────────────────
 
-// Configure your LLM endpoint here
-// Default: use Ollama on the local machine
 const LLM_CONFIG = {
-  provider: 'ollama',       // 'ollama' | 'openai' | 'anthropic'
+  provider: 'ollama',
   baseUrl: 'http://127.0.0.1:11434',
   model: 'llama3.2:latest',
-  apiKey: null,
 };
 
-async function createLLMClient() {
-  return {
-    async complete(prompt) {
-      if (LLM_CONFIG.provider === 'ollama') {
-        const res = await fetch(`${LLM_CONFIG.baseUrl}/api/generate`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            model: LLM_CONFIG.model,
-            prompt,
-            stream: false,
-          }),
-        });
-        const data = await res.json();
-        return data.response || '';
-      }
-      // Add OpenAI/Anthropic support as needed
-      return '';
-    }
-  };
-}
-
 let llm = null;
-createLLMClient().then(c => { llm = c; console.log('[brainclaw] LLM client ready'); }).catch(() => {
-  console.warn('[brainclaw] LLM not available — guideline synthesis disabled');
-});
+(async () => {
+  try {
+    const res = await fetch(`${LLM_CONFIG.baseUrl}/api/generate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: LLM_CONFIG.model, prompt: 'hi', stream: false }),
+    });
+    if (res.ok) {
+      llm = {
+        async complete(prompt) {
+          const r = await fetch(`${LLM_CONFIG.baseUrl}/api/generate`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ model: LLM_CONFIG.model, prompt, stream: false }),
+          });
+          const d = await r.json();
+          return d.response || '';
+        }
+      };
+      console.log('[brainclaw] LLM client ready');
+    }
+  } catch {
+    console.warn('[brainclaw] LLM not available — guideline synthesis disabled');
+  }
+})();
 
 // ── Fastify ─────────────────────────────────────────────────────────────────
 
 const fastify = Fastify({ logger: { level: 'info' } });
-
 await fastify.register(cors, { origin: true });
 
-// Health
 fastify.get('/health', async () => ({ status: 'ok', ts: Date.now() }));
 
 // ── Agent management ────────────────────────────────────────────────────────
@@ -75,9 +68,9 @@ fastify.post('/api/agents/:agentId', async (req, reply) => {
 
 fastify.get('/api/agents', async () => listAgents());
 
-// ── Episodes ─────────────────────────────────────────────────────────────────
+// ── Episodes ────────────────────────────────────────────────────────────────
 
-fastify.get('/api/episodes/leaderboard', async (req, reply) => {
+fastify.get('/api/episodes/leaderboard', async () => {
   const agents = listAgents();
   const leaderboard = agents.map(a => {
     const stats = getStats(a.id);
@@ -87,7 +80,7 @@ fastify.get('/api/episodes/leaderboard', async (req, reply) => {
   return { leaderboard };
 });
 
-fastify.get('/api/episodes/:agentId', async (req, reply) => {
+fastify.get('/api/episodes/:agentId', async (req) => {
   const { agentId } = req.params;
   const { limit = 20, minQ } = req.query;
   const episodes = minQ !== undefined
@@ -96,13 +89,12 @@ fastify.get('/api/episodes/:agentId', async (req, reply) => {
   return { episodes, count: episodes.length };
 });
 
-// ── Experience recording ─────────────────────────────────────────────────────
+// ── Experience recording ────────────────────────────────────────────────────
 
 fastify.post('/api/experiences', async (req, reply) => {
-  const { agentId, userMessage, agentReply, toolWasUsed, contextEmbedding } = req.body;
+  const { agentId, userMessage, agentReply, toolWasUsed } = req.body;
   if (!agentId) return reply.status(400).send({ error: 'agentId required' });
-
-  const episodeId = await recordExperience({ agentId, userMessage, agentReply, toolWasUsed, reward: 0, llm });
+  const episodeId = await recordExperience({ agentId, userMessage, agentReply, toolWasUsed, llm });
   return { ok: true, episodeId };
 });
 
@@ -111,7 +103,6 @@ fastify.post('/api/experiences', async (req, reply) => {
 fastify.post('/api/feedback', async (req, reply) => {
   const { agentId, episodeId, reward, confidence, note } = req.body;
   if (!agentId) return reply.status(400).send({ error: 'agentId required' });
-
   const result = await processFeedback({ agentId, episodeId, reward, confidence: confidence ?? 0.8, note, llm });
   return result;
 });
@@ -121,25 +112,19 @@ fastify.post('/api/feedback', async (req, reply) => {
 fastify.post('/api/retrieve', async (req, reply) => {
   const { agentId, contextText, contextEmbedding, limit } = req.body;
   if (!agentId) return reply.status(400).send({ error: 'agentId required' });
-
   const result = await retrieve({ agentId, contextEmbedding, contextText, limit: limit ?? 5 });
-  const injection = formatInjection(result);
-  return { ...result, injectionText: injection };
+  return { ...result, injectionText: formatInjection(result) };
 });
 
 // ── Guidelines ──────────────────────────────────────────────────────────────
 
-fastify.get('/api/guidelines/:agentId', async (req, reply) => {
-  const { agentId } = req.params;
-  return formatGuidelinesJSON(agentId);
-});
+fastify.get('/api/guidelines/:agentId', async (req) => formatGuidelinesJSON(req.params.agentId));
 
-fastify.get('/api/guidelines/:agentId/prompt', async (req, reply) => {
-  const { agentId } = req.params;
-  return { text: formatGuidelinesPrompt(agentId) };
-});
+fastify.get('/api/guidelines/:agentId/prompt', async (req) => ({
+  text: formatGuidelinesPrompt(req.params.agentId)
+}));
 
-// ── Task management ─────────────────────────────────────────────────────────
+// ── Task management ────────────────────────────────────────────────────────
 
 fastify.post('/api/tasks/start', async (req, reply) => {
   const { agentId, intent } = req.body;
@@ -155,12 +140,9 @@ fastify.post('/api/tasks/close', async (req, reply) => {
   return { episode };
 });
 
-fastify.get('/api/tasks/:agentId', async (req, reply) => {
-  const { agentId } = req.params;
-  return getOpenTask(agentId) || { status: 'no_open_task' };
-});
+fastify.get('/api/tasks/:agentId', async (req) => getOpenTask(req.params.agentId) || { status: 'no_open_task' });
 
-// ── Shared hints (A2A) ──────────────────────────────────────────────────────
+// ── Shared hints (A2A) ────────────────────────────────────────────────────
 
 fastify.post('/api/shared', async (req, reply) => {
   const { fromAgent, pattern, guideline, category, confidence } = req.body;
@@ -169,133 +151,145 @@ fastify.post('/api/shared', async (req, reply) => {
   return { id };
 });
 
-fastify.get('/api/shared', async (req, reply) => {
-  const { category } = req.query;
-  return getSharedHints(null, category);
-});
+fastify.get('/api/shared', async (req) => getSharedHints(null, req.query.category));
 
 fastify.post('/api/shared/:hintId/vote', async (req, reply) => {
-  const { hintId } = req.params;
   const { upvote } = req.body;
-  voteHint(hintId, upvote ?? true);
+  voteHint(req.params.hintId, upvote ?? true);
   return { ok: true };
 });
 
-// ── Stats ───────────────────────────────────────────────────────────────────
+// ── Stats ─────────────────────────────────────────────────────────────────
 
-fastify.get('/api/stats/:agentId', async (req, reply) => {
-  const { agentId } = req.params;
-  return getStats(agentId);
+fastify.get('/api/stats/:agentId', async (req) => getStats(req.params.agentId));
+
+// ── Broadcast / PubSub ────────────────────────────────────────────────────
+
+fastify.post('/api/broadcast/:channel', async (req, reply) => {
+  const { channel } = req.params;
+  const { from, text } = req.body;
+  if (!from || !text) return reply.status(400).send({ error: 'from and text required' });
+  broadcast(channel, { from, text, ts: Date.now() });
+  return { ok: true, channel, from, ts: Date.now() };
 });
 
-// ── Memory summary ───────────────────────────────────────────────────────────
+fastify.get('/api/broadcast/channels', async () => ({
+  channels: ['team', 'fuma', 'kojiro', 'sasuke', 'nexus']
+}));
 
-fastify.post('/api/summarize', async (req, reply) => {
-  // Lightweight context summarization for injection
-  const { agentId, recentMessages } = req.body;
-  if (!agentId) return reply.status(400).send({ error: 'agentId required' });
+// ── Cron ──────────────────────────────────────────────────────────────────
 
-  const summary = recentMessages
-    .map(m => `[${m.role}]: ${sanitizeMemoryText(m.content || '').slice(0, 150)}`)
-    .join('\n');
-
-  return { summary: summary.slice(0, 1000) };
-});
-
-// ── Decay cron (called by external scheduler) ─────────────────────────────────
-
-fastify.post('/api/cron/decay', async (req, reply) => {
+fastify.post('/api/cron/decay', async () => {
   const agents = listAgents();
   const results = {};
-  for (const agent of agents) {
-    results[agent.id] = decayGuidelines(agent.id);
-  }
+  for (const agent of agents) results[agent.id] = decayGuidelines(agent.id);
   return { decayed: results };
 });
 
-// ── HTTP Server + WebSocket ──────────────────────────────────────────────────
+// ── WebSocket + PubSub ────────────────────────────────────────────────────
 
-// ── Start ───────────────────────────────────────────────────────────────────
+// Module-level shared state (initialized in start())
+let wsClients;    // clientId -> { ws, agentId, label }
+let subscriptions; // clientId -> Set<channel>
+
+function handleSubscribe(clientId, channel) {
+  if (!subscriptions.has(clientId)) subscriptions.set(clientId, new Set());
+  subscriptions.get(clientId).add(channel);
+}
+
+function handleUnsubscribe(clientId, channel) {
+  subscriptions.get(clientId)?.delete(channel);
+}
+
+function broadcast(channel, msg) {
+  if (!wsClients) return; // not started yet
+  const payload = JSON.stringify({ type: 'broadcast', channel, ...msg });
+  for (const [clientId, client] of wsClients) {
+    if (client.ws.readyState !== 1) continue;
+    const subs = subscriptions.get(clientId);
+    if (!subs || (!subs.has(channel) && !subs.has('team'))) continue;
+    client.ws.send(payload);
+  }
+}
+
+// ── Start ────────────────────────────────────────────────────────────────
 
 async function start() {
-  // Start Fastify (HTTP + WebSocket on same port)
   await fastify.listen({ port: PORT, host: HOST, listenTextResolver: () => {} });
 
-  // Attach WebSocket server to the same HTTP server
+  wsClients = new Map();
+  subscriptions = new Map();
+
   const wss = new WebSocketServer({ noServer: true });
-  const wsClients = new Map(); // clientId -> { ws, agentId, label }
 
   fastify.server.on('upgrade', (request, socket, head) => {
-    if (request.url === '/' || request.url === '/ws') {
-      wss.handleUpgrade(request, socket, head, (ws) => {
-        const clientId = nanoid(8);
-        wsClients.set(clientId, { ws, agentId: null, label: 'unknown' });
-        console.log(`[brainclaw:ws] +${clientId} (total: ${wsClients.size})`);
-        ws.send(JSON.stringify({ type: 'welcome', clientId }));
+    if (request.url !== '/' && request.url !== '/ws') return;
+    wss.handleUpgrade(request, socket, head, (ws) => {
+      const clientId = nanoid(8);
+      wsClients.set(clientId, { ws, agentId: null, label: 'unknown' });
+      console.log(`[brainclaw:ws] +${clientId} (total: ${wsClients.size})`);
+      ws.send(JSON.stringify({ type: 'welcome', clientId }));
 
-        ws.on('message', (raw) => {
-          let msg;
-          try { msg = JSON.parse(raw); } catch { return; }
+      ws.on('message', (raw) => {
+        let msg;
+        try { msg = JSON.parse(raw); } catch { return; }
+        const client = wsClients.get(clientId);
 
-          switch (msg.type) {
-            case 'register':
-              wsClients.get(clientId).agentId = msg.agentId;
-              wsClients.get(clientId).label = msg.label || 'unknown';
-              console.log(`[brainclaw:ws] ${clientId} registered as ${msg.agentId} (${msg.label})`);
-              ws.send(JSON.stringify({ type: 'registered', agentId: msg.agentId }));
-              break;
-            case 'experience':
-              recordExperience({ agentId: msg.agentId, ...msg.data, llm })
-                .then(episodeId => ws.send(JSON.stringify({ type: 'experience_recorded', episodeId })))
-                .catch(e => ws.send(JSON.stringify({ type: 'error', message: e.message })));
-              break;
-            case 'retrieve':
-              retrieve({ agentId: msg.agentId, contextText: msg.contextText, contextEmbedding: msg.contextEmbedding, llm })
-                .then(result => {
-                  const injection = formatInjection(result);
-                  ws.send(JSON.stringify({ type: 'retrieval_result', injectionText: injection, guidelines: result.guidelines }));
-                }).catch(e => ws.send(JSON.stringify({ type: 'error', message: e.message })));
-              break;
-            case 'feedback':
-              processFeedback({ agentId: msg.agentId, ...msg.data, llm })
-                .then(result => ws.send(JSON.stringify({ type: 'feedback_processed', result })))
-                .catch(e => ws.send(JSON.stringify({ type: 'error', message: e.message })));
-              break;
-            case 'ping':
-              ws.send(JSON.stringify({ type: 'pong', ts: Date.now() }));
-              break;
-          }
-        });
-
-        ws.on('close', () => {
-          wsClients.delete(clientId);
-          console.log(`[brainclaw:ws] -${clientId} (total: ${wsClients.size})`);
-        });
-
-        ws.on('error', (err) => {
-          console.error(`[brainclaw:ws] ${clientId} error:`, err.message);
-        });
+        switch (msg.type) {
+          case 'register':
+            client.agentId = msg.agentId;
+            client.label = msg.label || 'unknown';
+            console.log(`[brainclaw:ws] ${clientId} registered as ${msg.agentId}`);
+            ws.send(JSON.stringify({ type: 'registered', agentId: msg.agentId }));
+            break;
+          case 'subscribe':
+            handleSubscribe(clientId, msg.channel);
+            ws.send(JSON.stringify({ type: 'subscribed', channel: msg.channel }));
+            break;
+          case 'unsubscribe':
+            handleUnsubscribe(clientId, msg.channel);
+            ws.send(JSON.stringify({ type: 'unsubscribed', channel: msg.channel }));
+            break;
+          case 'broadcast':
+            broadcast(msg.channel || 'team', { from: client.agentId, text: msg.text, ts: Date.now() });
+            break;
+          case 'experience':
+            recordExperience({ agentId: msg.agentId, ...msg.data, llm })
+              .then(id => ws.send(JSON.stringify({ type: 'experience_recorded', episodeId: id })))
+              .catch(e => ws.send(JSON.stringify({ type: 'error', message: e.message })));
+            break;
+          case 'retrieve':
+            retrieve({ agentId: msg.agentId, contextText: msg.contextText, llm })
+              .then(result => ws.send(JSON.stringify({ type: 'retrieval_result', injectionText: formatInjection(result), guidelines: result.guidelines })))
+              .catch(e => ws.send(JSON.stringify({ type: 'error', message: e.message })));
+            break;
+          case 'feedback':
+            processFeedback({ agentId: msg.agentId, ...msg.data, llm })
+              .then(result => ws.send(JSON.stringify({ type: 'feedback_processed', result })))
+              .catch(e => ws.send(JSON.stringify({ type: 'error', message: e.message })));
+            break;
+          case 'ping':
+            ws.send(JSON.stringify({ type: 'pong', ts: Date.now() }));
+            break;
+        }
       });
-    }
-  });
 
-  // Broadcast helper
-  fastify.server._wsClients = wsClients;
+      ws.on('close', () => {
+        wsClients.delete(clientId);
+        subscriptions.delete(clientId);
+        console.log(`[brainclaw:ws] -${clientId} (total: ${wsClients.size})`);
+      });
+
+      ws.on('error', (err) => console.error(`[brainclaw:ws] ${clientId} error:`, err.message));
+    });
+  });
 
   console.log(`[brainclaw] Brainclaw sidecar running on http://${HOST}:${PORT}`);
   console.log(`[brainclaw] WebSocket on ws://${HOST}:${PORT}/ws`);
   console.log(`[brainclaw] LLM: ${LLM_CONFIG.provider}/${LLM_CONFIG.model}`);
-  getDb(); // Initialize DB on startup
+  getDb();
 }
 
-start().catch(err => {
-  console.error('[brainclaw] Failed to start:', err);
-  process.exit(1);
-});
+start().catch(err => { console.error('[brainclaw] Failed to start:', err); process.exit(1); });
 
-// Graceful shutdown
-process.on('SIGTERM', () => {
-  console.log('[brainclaw] Shutting down...');
-  httpServer.close();
-  process.exit(0);
-});
+process.on('SIGTERM', () => { console.log('[brainclaw] Shutting down...'); process.exit(0); });
