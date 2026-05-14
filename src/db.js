@@ -164,6 +164,14 @@ export function getEpisodesByAgent(agentId, limit = 50) {
   }));
 }
 
+export function getTopEpisodes(agentId, minQ = 0, limit = 20) {
+  return getDb().prepare(
+    'SELECT * FROM episodes WHERE agent_id = ? AND q_value >= ? ORDER BY q_value DESC, created_at DESC LIMIT ?'
+  ).all(agentId, minQ, limit).map(r => ({
+    ...r, embedding: r.embedding ? JSON.parse(r.embedding) : null, tags: JSON.parse(r.tags || '[]')
+  }));
+}
+
 export function searchEpisodes(agentId, embedding, minSimilarity = 0.7, limit = 10) {
   // Naive cosine similarity on embedding vectors (stored as JSON arrays)
   const episodes = getDb().prepare(

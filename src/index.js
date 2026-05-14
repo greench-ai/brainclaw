@@ -6,7 +6,7 @@ import Fastify from 'fastify';
 import cors from '@fastify/cors';
 import { WebSocketServer } from 'ws';
 import { nanoid } from 'nanoid';
-import { getDb, upsertAgent, listAgents, getStats, insertSharedHint, getSharedHints, voteHint } from './db.js';
+import { getDb, upsertAgent, listAgents, getStats, insertSharedHint, getSharedHints, voteHint, getEpisodesByAgent, getTopEpisodes } from './db.js';
 import { recordExperience, processFeedback, retrieve, formatInjection, startTask, closeTask, getOpenTask } from './memory.js';
 import { formatGuidelinesJSON, formatGuidelinesPrompt, decayGuidelines } from './guidelines.js';
 import { sanitizeMemoryText, detectIntent, generalizeWithLLM } from './sanitize.js';
@@ -74,6 +74,27 @@ fastify.post('/api/agents/:agentId', async (req, reply) => {
 });
 
 fastify.get('/api/agents', async () => listAgents());
+
+// ── Episodes ─────────────────────────────────────────────────────────────────
+
+fastify.get('/api/episodes/leaderboard', async (req, reply) => {
+  const agents = listAgents();
+  const leaderboard = agents.map(a => {
+    const stats = getStats(a.id);
+    const topEps = getTopEpisodes(a.id, 0.3, 5);
+    return { agentId: a.id, name: a.name, ...stats, topEps };
+  }).sort((a, b) => b.avgQ - a.avgQ);
+  return { leaderboard };
+});
+
+fastify.get('/api/episodes/:agentId', async (req, reply) => {
+  const { agentId } = req.params;
+  const { limit = 20, minQ } = req.query;
+  const episodes = minQ !== undefined
+    ? getTopEpisodes(agentId, parseFloat(minQ), parseInt(limit))
+    : getEpisodesByAgent(agentId, parseInt(limit));
+  return { episodes, count: episodes.length };
+});
 
 // ── Experience recording ─────────────────────────────────────────────────────
 
