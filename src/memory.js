@@ -261,10 +261,30 @@ export async function retrieve({ agentId, contextEmbedding, contextText, limit =
     })
     .slice(0, CONFIG.retrieval.maxInject);
 
+  // Fetch shared hints from other agents
+  const { getSharedHints } = await import('./db.js');
+  const allSharedHints = getSharedHints(null, null, 50);
+  const scoredHints = allSharedHints
+    .filter(h => h.from_agent !== agentId) // don't show own hints back to self
+    .map(h => {
+      const ctxWords = (contextText || '').toLowerCase().split(/\s+/);
+      const hintWords = (h.pattern + ' ' + h.guideline).toLowerCase().split(/\s+/);
+      const overlap = ctxWords.filter(w => w.length > 3 && hintWords.some(hw => hw.includes(w))).length;
+      const score = overlap / Math.max(ctxWords.length, 1);
+      return { ...h, relevanceScore: score };
+    })
+    .filter(h => h.relevanceScore > 0.1 || h.confidence > 0.6)
+    .sort((a, b) => {
+      const scoreA = a.relevanceScore * 0.4 + a.confidence * 0.6;
+      const scoreB = b.relevanceScore * 0.4 + b.confidence * 0.6;
+      return scoreB - scoreA;
+    })
+    .slice(0, 5);
+
   return {
     guidelines: scoredGuidelines,
     episodes: episodes.map(e => ({ id: e.id, intent: e.intent, action: e.action, q: e.q_value, similarity: e.similarity })),
-    sharedHints: [],
+    sharedHints: scoredHints,
   };
 }
 
@@ -273,13 +293,20 @@ export async function retrieve({ agentId, contextEmbedding, contextText, limit =
 /**
  * Format retrieved memories as a prompt injection string
  */
-export function formatInjection({ guidelines, episodes }) {
+export function formatInjection({ guidelines, episodes, sharedHints }) {
   const parts = [];
 
   if (guidelines.length > 0) {
     parts.push('## Learned Guidelines (apply if relevant)');
     for (const g of guidelines) {
       parts.push(`[${g.category.toUpperCase()}] ${g.guideline}`);
+    }
+  }
+
+  if (sharedHints && sharedHints.length > 0) {
+    parts.push('\n## Team Hints (from other agents)');
+    for (const h of sharedHints) {
+      parts.push(`[${h.category?.toUpperCase() || 'TEAM'}] ${h.guideline} (via ${h.from_agent})`);
     }
   }
 
