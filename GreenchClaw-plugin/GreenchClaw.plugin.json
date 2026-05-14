@@ -1,0 +1,83 @@
+{
+  "id": "brainclaw",
+  "name": "Brainclaw",
+  "description": "Self-evolving multi-agent episodic memory. Records experiences, updates Q-values, synthesizes behavioral guidelines, and shares hints across agents via A2A.",
+  "activation": {
+    "onStartup": true
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "enabled": {
+        "type": "boolean",
+        "default": true
+      },
+      "sidecarUrl": {
+        "type": "string",
+        "default": "http://127.0.0.1:3002"
+      },
+      "agentId": {
+        "type": "string",
+        "default": "sasuke"
+      },
+      "learnMode": {
+        "type": "string",
+        "enum": ["all", "tools_only", "balanced"],
+        "default": "balanced"
+      },
+      "retrievalEnabled": {
+        "type": "boolean",
+        "default": true
+      },
+      "recordEnabled": {
+        "type": "boolean",
+        "default": true
+      },
+      "injectGuidelines": {
+        "type": "boolean",
+        "default": true
+      },
+      "maxInjectChars": {
+        "type": "integer",
+        "minimum": 100,
+        "maximum": 4000,
+        "default": 1500
+      },
+      "allowConversationAccess": {
+        "type": "boolean",
+        "default": true
+      }
+    }
+  },
+  "uiHints": {
+    "enabled": {
+      "label": "Enable Brainclaw",
+      "help": "Globally enable or pause Brainclaw memory learning."
+    },
+    "sidecarUrl": {
+      "label": "Brainclaw Sidecar URL",
+      "help": "HTTP URL of the Brainclaw sidecar service."
+    },
+    "agentId": {
+      "label": "Agent ID",
+      "help": "Unique identifier for this agent in Brainclaw's memory."
+    },
+    "learnMode": {
+      "label": "Learn Mode",
+      "help": "all=learn every turn, tools_only=only tool-use turns, balanced=prefer tool turns."
+    },
+    "retrievalEnabled": {
+      "label": "Enable Memory Retrieval",
+      "help": "Retrieve relevant guidelines before answering."
+    },
+    "recordEnabled": {
+      "label": "Enable Experience Recording",
+      "help": "Record agent actions as episodic memories."
+    },
+    "injectGuidelines": {
+      "label": "Inject Guidelines into Prompt",
+      "help": "Prepend learned guidelines to system prompt."
+    }
+  }
+}
