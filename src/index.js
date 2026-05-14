@@ -7,13 +7,18 @@ import cors from '@fastify/cors';
 import { WebSocketServer } from 'ws';
 import { createServer } from 'http';
 import { nanoid } from 'nanoid';
+import { join, dirname } from 'path';
+import { fileURLToPath } from 'url';
+import { readFileSync } from 'fs';
 import { getDb, upsertAgent, listAgents, getStats, insertSharedHint, getSharedHints, voteHint, getEpisodesByAgent, getTopEpisodes } from './db.js';
 import { recordExperience, processFeedback, retrieve, formatInjection, startTask, closeTask, getOpenTask } from './memory.js';
 import { formatGuidelinesJSON, formatGuidelinesPrompt, decayGuidelines } from './guidelines.js';
 import { sanitizeMemoryText, detectIntent } from './sanitize.js';
 
+const __dirname = dirname(fileURLToPath(import.meta.url));
 const PORT = 3002;
 const HOST = '0.0.0.0';
+const CHAT_UI_PATH = join(__dirname, '..', 'src', 'chat-ui.html');
 
 // ── LLM Integration ─────────────────────────────────────────────────────────
 
@@ -54,6 +59,12 @@ let llm = null;
 
 const fastify = Fastify({ logger: { level: 'info' } });
 await fastify.register(cors, { origin: true });
+
+// Team chat UI
+fastify.get('/chat', (req, reply) => {
+  reply.header('Content-Type', 'text/html');
+  reply.send(readFileSync(CHAT_UI_PATH, 'utf8'));
+});
 
 fastify.get('/health', async () => ({ status: 'ok', ts: Date.now() }));
 
@@ -98,7 +109,7 @@ fastify.post('/api/experiences', async (req, reply) => {
   return { ok: true, episodeId };
 });
 
-// ── Feedback ────────────────────────────────────────────────────────────────
+// ── Feedback ───────────────────────────────────────────────────────────────
 
 fastify.post('/api/feedback', async (req, reply) => {
   const { agentId, episodeId, reward, confidence, note } = req.body;
@@ -107,7 +118,7 @@ fastify.post('/api/feedback', async (req, reply) => {
   return result;
 });
 
-// ── Retrieval ───────────────────────────────────────────────────────────────
+// ── Retrieval ──────────────────────────────────────────────────────────────
 
 fastify.post('/api/retrieve', async (req, reply) => {
   const { agentId, contextText, contextEmbedding, limit } = req.body;
@@ -116,7 +127,7 @@ fastify.post('/api/retrieve', async (req, reply) => {
   return { ...result, injectionText: formatInjection(result) };
 });
 
-// ── Guidelines ──────────────────────────────────────────────────────────────
+// ── Guidelines ─────────────────────────────────────────────────────────────
 
 fastify.get('/api/guidelines/:agentId', async (req) => formatGuidelinesJSON(req.params.agentId));
 
@@ -142,7 +153,7 @@ fastify.post('/api/tasks/close', async (req, reply) => {
 
 fastify.get('/api/tasks/:agentId', async (req) => getOpenTask(req.params.agentId) || { status: 'no_open_task' });
 
-// ── Shared hints (A2A) ────────────────────────────────────────────────────
+// ── Shared hints (A2A) ──────────────────────────────────────────────────
 
 fastify.post('/api/shared', async (req, reply) => {
   const { fromAgent, pattern, guideline, category, confidence } = req.body;
@@ -177,7 +188,7 @@ fastify.get('/api/broadcast/channels', async () => ({
   channels: ['team', 'fuma', 'kojiro', 'sasuke', 'nexus']
 }));
 
-// ── Cron ──────────────────────────────────────────────────────────────────
+// ── Cron ─────────────────────────────────────────────────────────────────
 
 fastify.post('/api/cron/decay', async () => {
   const agents = listAgents();
@@ -188,7 +199,6 @@ fastify.post('/api/cron/decay', async () => {
 
 // ── WebSocket + PubSub ────────────────────────────────────────────────────
 
-// Module-level shared state (initialized in start())
 let wsClients;    // clientId -> { ws, agentId, label }
 let subscriptions; // clientId -> Set<channel>
 
@@ -202,7 +212,7 @@ function handleUnsubscribe(clientId, channel) {
 }
 
 function broadcast(channel, msg) {
-  if (!wsClients) return; // not started yet
+  if (!wsClients) return;
   const payload = JSON.stringify({ type: 'broadcast', channel, ...msg });
   for (const [clientId, client] of wsClients) {
     if (client.ws.readyState !== 1) continue;
@@ -285,6 +295,7 @@ async function start() {
   });
 
   console.log(`[brainclaw] Brainclaw sidecar running on http://${HOST}:${PORT}`);
+  console.log(`[brainclaw] Team chat: http://${HOST}:${PORT}/chat`);
   console.log(`[brainclaw] WebSocket on ws://${HOST}:${PORT}/ws`);
   console.log(`[brainclaw] LLM: ${LLM_CONFIG.provider}/${LLM_CONFIG.model}`);
   getDb();
